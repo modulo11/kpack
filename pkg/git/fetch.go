@@ -2,18 +2,15 @@ package git
 
 import (
 	"fmt"
+	"github.com/BurntSushi/toml"
+	"github.com/pkg/errors"
 	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"path"
 
-	"github.com/BurntSushi/toml"
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
-	"github.com/go-git/go-git/v5/plumbing"
-	"github.com/go-git/go-git/v5/plumbing/transport"
-	"github.com/pkg/errors"
+	git2go "github.com/libgit2/git2go/v31"
 )
 
 type Fetcher struct {
@@ -22,60 +19,57 @@ type Fetcher struct {
 }
 
 func (f Fetcher) Fetch(dir, gitURL, gitRevision, metadataDir string) error {
-	resolvedAuth, err := f.Keychain.Resolve(gitURL)
+	f.Logger.Printf("Cloning %q @ %q...", gitURL, gitRevision)
+
+	repository, err := git2go.InitRepository(dir, false)
 	if err != nil {
 		return err
 	}
+	fmt.Println("remote create")
 
-	tmpDir, err := ioutil.TempDir("", "git-clone-")
-	if err != nil {
-		return err
-	}
-
-	repo, err := git.PlainInit(tmpDir, false)
-	if err != nil {
-		return errors.Wrap(err, "unable to init git repository")
-	}
-
-	remote, err := repo.CreateRemote(&config.RemoteConfig{
-		Name: "origin",
-		URLs: []string{gitURL},
+	remote2, err := repository.Remotes.CreateWithOptions(gitURL, &git2go.RemoteCreateOptions{
+		Name:  "origin",
+		Flags: git2go.RemoteCreateSkipInsteadof,
 	})
 	if err != nil {
-		return errors.Wrap(err, "unable to create remote")
+		return err
 	}
 
-	opts := &git.FetchOptions{
-		RefSpecs: []config.RefSpec{"refs/*:refs/*"},
-		Auth:     resolvedAuth,
-		Depth:    0,
-	}
+	err = remote2.Fetch([]string{"refs/*:refs/*"}, &git2go.FetchOptions{
+		DownloadTags: git2go.DownloadTagsNone,
+		RemoteCallbacks: git2go.RemoteCallbacks{
+			CredentialsCallback: func(url string, username_from_url string, allowed_types git2go.CredentialType) (*git2go.Credential, error) {
 
-	f.Logger.Printf("Cloning %q @ %q...", gitURL, gitRevision)
-	err = remote.Fetch(opts)
-	if err != nil && err != transport.ErrAuthenticationRequired {
-		return errors.Wrap(err, "unable to fetch git repository")
-	} else if err == transport.ErrAuthenticationRequired {
-		return errors.Errorf("invalid credentials to fetch git repository: %s", gitURL)
-	}
-
-	workTree, err := repo.Worktree()
+				return nil, nil
+			},
+			CertificateCheckCallback: func(cert *git2go.Certificate, valid bool, hostname string) git2go.ErrorCode {
+				return git2go.ErrorCodeOK
+			},
+		},
+	}, "")
 	if err != nil {
-		return errors.Wrap(err, "unable to retrieve working tree")
+		return err
 	}
 
-	hashes, err := repo.ResolveRevision(plumbing.Revision(gitRevision))
+	oid, err := resolveRevision(repository, gitRevision)
 	if err != nil {
-		return errors.Wrapf(err, "resolving %s", gitRevision)
+		return err
 	}
 
-	if err := workTree.Checkout(&git.CheckoutOptions{Hash: *hashes}); err != nil {
-		return errors.Wrapf(err, "unable to checkout revision: %s", gitRevision)
-	}
-
-	err = copyDir(tmpDir, dir)
+	commit, err := repository.LookupCommit(oid)
 	if err != nil {
-		return fmt.Errorf("failed to copy: %s: %s", dir, err.Error())
+		return err
+	}
+
+	err = repository.SetHeadDetached(commit.Id())
+	if err != nil {
+		return err
+	}
+	err = repository.CheckoutHead(&git2go.CheckoutOpts{
+		Strategy: git2go.CheckoutForce,
+	})
+	if err != nil {
+		return err
 	}
 
 	projectMetadataFile, err := os.Create(path.Join(metadataDir, "project-metadata.toml"))
@@ -92,7 +86,7 @@ func (f Fetcher) Fetch(dir, gitURL, gitRevision, metadataDir string) error {
 				Revision:   gitRevision,
 			},
 			Version: version{
-				Commit: hashes.String(),
+				Commit: commit.Id().String(),
 			},
 		},
 	}
@@ -102,6 +96,15 @@ func (f Fetcher) Fetch(dir, gitURL, gitRevision, metadataDir string) error {
 
 	f.Logger.Printf("Successfully cloned %q @ %q in path %q", gitURL, gitRevision, dir)
 	return nil
+}
+
+func resolveRevision(repository *git2go.Repository, gitRevision string) (*git2go.Oid, error) {
+	ref, err := repository.References.Dwim(gitRevision)
+	if err != nil {
+		return git2go.NewOid(gitRevision) //TODO proper error handling
+	}
+
+	return ref.Target(), nil
 }
 
 func copyFile(src, dest string) error {

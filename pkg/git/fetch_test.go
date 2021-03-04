@@ -18,6 +18,11 @@ import (
 )
 
 func TestGitCheckout(t *testing.T) {
+	testDir, err := ioutil.TempDir("", "test-git2")
+	require.NoError(t, err)
+	err = os.Setenv("GIT_CONFIG", testDir)
+	require.NoError(t, err)
+
 	spec.Run(t, "Test Describe Image", testGitCheckout)
 }
 
@@ -41,7 +46,8 @@ func testGitCheckout(t *testing.T, when spec.G, it spec.S) {
 		})
 
 		it.After(func() {
-			require.NoError(t, os.RemoveAll(testDir))
+			fmt.Println(testDir)
+			//require.NoError(t, os.RemoveAll(testDir))
 			require.NoError(t, os.RemoveAll(metadataDir))
 		})
 
@@ -59,7 +65,7 @@ func testGitCheckout(t *testing.T, when spec.G, it spec.S) {
 				status, err := worktree.Status()
 				require.NoError(t, err)
 
-				require.True(t, status.IsClean())
+				require.True(t, status.IsClean(), "should be clean")
 
 				require.Contains(t, outpuBuffer.String(), fmt.Sprintf("Successfully cloned \"%s\" @ \"%s\"", gitUrl, revision))
 
@@ -85,9 +91,11 @@ func testGitCheckout(t *testing.T, when spec.G, it spec.S) {
 
 		it("fetches a tag", testFetch("https://github.com/git-fixtures/tags", "lightweight-tag"))
 
-		it("fetches a revision", testFetch("https://github.com/git-fixtures/basic", "b029517f6300c2da0f4b651b8642506cd6aaf45d"))
+		it("fetches a revision", testFetch("https://github.com/git-fixtures/basic", "e8d3ffa"))
 
-		it("returns invalid credentials to fetch error on authentication required", func() {
+		it("fetches garbage", testFetch("https://github.com/git-fixtures/basic", "bbd63d5cfbccc7c205ef832e076269309bffdcee"))
+
+		it.Pend("returns invalid credentials to fetch error on authentication required", func() {
 			err := fetcher.Fetch(testDir, "http://github.com/pivotal/kpack-nonexistent-test-repo", "master", "")
 			require.EqualError(t, err, "invalid credentials to fetch git repository: http://github.com/pivotal/kpack-nonexistent-test-repo")
 		})
